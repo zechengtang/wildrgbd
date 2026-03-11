@@ -27,6 +27,8 @@ To download all categories, execute `python download.py --cat all`.
 
 To download specific one category, execute `python download.py --cat <category_name>`.
 
+To accelerate downloads, you can increase parallel workers (for each category), e.g. `python download.py --cat all --workers 8`.
+
 You could check all category names in the download scripts.
 
 ### Dataset format
