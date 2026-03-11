@@ -1,5 +1,6 @@
 import argparse
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://huggingface.co/hongchi/wildrgbd/resolve/main"
@@ -58,7 +59,7 @@ def run_cmd(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
-def download_file(file_name: str) -> None:
+def download_file(file_name: str) -> str:
     url = f"{BASE_URL}/{file_name}?download=true"
     print(f"[Download] {file_name}")
     run_cmd([
@@ -71,9 +72,11 @@ def download_file(file_name: str) -> None:
         file_name,
         url,
     ])
+    return file_name
 
 
 def merge_extract_cleanup(cat: str, parts: list[str]) -> None:
+    print(f"[Extract] {cat}")
     if len(parts) > 1:
         merged_zip = f"{cat}-single.zip"
         run_cmd(["zip", "-F", f"{cat}.zip", "--out", merged_zip])
@@ -83,18 +86,76 @@ def merge_extract_cleanup(cat: str, parts: list[str]) -> None:
     else:
         run_cmd(["unzip", "-o", f"{cat}.zip"])
         run_cmd(["rm", "-f", f"{cat}.zip"])
-
-
-def download_category(cat: str, workers: int) -> None:
-    parts = categories[cat]
-    print(f"\n=== Processing category: {cat} ===")
-    with ThreadPoolExecutor(max_workers=min(workers, len(parts))) as executor:
-        futures = [executor.submit(download_file, file_name) for file_name in parts]
-        for future in as_completed(futures):
-            future.result()
-
-    merge_extract_cleanup(cat, parts)
     print(f"[Done] {cat}")
+
+
+def run_pipeline(selected_cats: list[str], download_workers: int, extract_workers: int) -> None:
+    file_tasks = [(cat, file_name) for cat in selected_cats for file_name in categories[cat]]
+    required_counts = {cat: len(categories[cat]) for cat in selected_cats}
+    downloaded_counts = {cat: 0 for cat in selected_cats}
+
+    extract_futures = {}
+    failed_cats = set()
+    lock = threading.Lock()
+
+    print(
+        f"Starting pipeline: {len(file_tasks)} files, "
+        f"download_workers={download_workers}, extract_workers={extract_workers}"
+    )
+
+    with ThreadPoolExecutor(max_workers=extract_workers) as extract_executor:
+        with ThreadPoolExecutor(max_workers=download_workers) as download_executor:
+            future_to_task = {
+                download_executor.submit(download_file, file_name): (cat, file_name)
+                for cat, file_name in file_tasks
+            }
+
+            for future in as_completed(future_to_task):
+                cat, file_name = future_to_task[future]
+                try:
+                    future.result()
+                except Exception as exc:
+                    with lock:
+                        failed_cats.add(cat)
+                    print(f"[Failed Download] {cat}/{file_name}: {exc}")
+                    continue
+
+                submit_extract = False
+                with lock:
+                    downloaded_counts[cat] += 1
+                    if (
+                        cat not in failed_cats
+                        and downloaded_counts[cat] == required_counts[cat]
+                        and cat not in extract_futures
+                    ):
+                        submit_extract = True
+
+                if submit_extract:
+                    print(f"[Ready] {cat} files complete, queue extract")
+                    extract_futures[cat] = extract_executor.submit(
+                        merge_extract_cleanup,
+                        cat,
+                        categories[cat],
+                    )
+
+        for cat, extract_future in extract_futures.items():
+            try:
+                extract_future.result()
+            except Exception as exc:
+                failed_cats.add(cat)
+                print(f"[Failed Extract] {cat}: {exc}")
+
+    missing_extract = [
+        cat
+        for cat in selected_cats
+        if cat not in failed_cats and downloaded_counts[cat] == required_counts[cat] and cat not in extract_futures
+    ]
+    if missing_extract:
+        failed_cats.update(missing_extract)
+
+    if failed_cats:
+        failed_desc = ", ".join(sorted(failed_cats))
+        raise RuntimeError(f"Pipeline failed for categories: {failed_desc}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -103,8 +164,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=4,
-        help="并行下载线程数（默认: 4）。",
+        default=8,
+        help="并行下载线程数（全局文件队列，默认: 8）。",
+    )
+    parser.add_argument(
+        "--extract-workers",
+        type=int,
+        default=1,
+        help="并行解压/清理线程数（默认: 1，避免磁盘争用）。",
     )
     return parser.parse_args()
 
@@ -113,6 +180,8 @@ def main() -> None:
     args = parse_args()
     if args.workers < 1:
         raise ValueError("--workers 必须 >= 1")
+    if args.extract_workers < 1:
+        raise ValueError("--extract-workers 必须 >= 1")
 
     if args.cat == 'all':
         selected = sorted(categories.keys())
@@ -122,8 +191,7 @@ def main() -> None:
             raise ValueError(f"Unknown category: {args.cat}. Available: {available}")
         selected = [args.cat]
 
-    for cat in selected:
-        download_category(cat, args.workers)
+    run_pipeline(selected, args.workers, args.extract_workers)
 
 
 if __name__ == "__main__":

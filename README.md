@@ -27,7 +27,7 @@ To download all categories, execute `python download.py --cat all`.
 
 To download specific one category, execute `python download.py --cat <category_name>`.
 
-To accelerate downloads, you can increase parallel workers (for each category), e.g. `python download.py --cat all --workers 8`.
+To accelerate downloads, the script now parallelizes across a global file queue. You can tune download/extract concurrency, e.g. `python download.py --cat all --workers 16 --extract-workers 1`.
 
 You could check all category names in the download scripts.
 
