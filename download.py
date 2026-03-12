@@ -2,6 +2,7 @@ import argparse
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 BASE_URL = "https://huggingface.co/hongchi/wildrgbd/resolve/main"
 
@@ -55,11 +56,11 @@ categories = {
 }
 
 
-def run_cmd(cmd: list[str]) -> None:
-    subprocess.run(cmd, check=True)
+def run_cmd(cmd: list[str], cwd: Path) -> None:
+    subprocess.run(cmd, check=True, cwd=str(cwd))
 
 
-def download_file(file_name: str) -> str:
+def download_file(file_name: str, output_dir: Path) -> str:
     url = f"{BASE_URL}/{file_name}?download=true"
     print(f"[Download] {file_name}")
     run_cmd([
@@ -71,25 +72,30 @@ def download_file(file_name: str) -> str:
         "-O",
         file_name,
         url,
-    ])
+    ], cwd=output_dir)
     return file_name
 
 
-def merge_extract_cleanup(cat: str, parts: list[str]) -> None:
+def merge_extract_cleanup(cat: str, parts: list[str], output_dir: Path) -> None:
     print(f"[Extract] {cat}")
     if len(parts) > 1:
         merged_zip = f"{cat}-single.zip"
-        run_cmd(["zip", "-F", f"{cat}.zip", "--out", merged_zip])
-        run_cmd(["unzip", "-o", merged_zip])
-        run_cmd(["rm", "-f", merged_zip])
-        run_cmd(["rm", "-f", *parts])
+        run_cmd(["zip", "-F", f"{cat}.zip", "--out", merged_zip], cwd=output_dir)
+        run_cmd(["unzip", "-o", merged_zip], cwd=output_dir)
+        run_cmd(["rm", "-f", merged_zip], cwd=output_dir)
+        run_cmd(["rm", "-f", *parts], cwd=output_dir)
     else:
-        run_cmd(["unzip", "-o", f"{cat}.zip"])
-        run_cmd(["rm", "-f", f"{cat}.zip"])
+        run_cmd(["unzip", "-o", f"{cat}.zip"], cwd=output_dir)
+        run_cmd(["rm", "-f", f"{cat}.zip"], cwd=output_dir)
     print(f"[Done] {cat}")
 
 
-def run_pipeline(selected_cats: list[str], download_workers: int, extract_workers: int) -> None:
+def run_pipeline(
+    selected_cats: list[str],
+    download_workers: int,
+    extract_workers: int,
+    output_dir: Path,
+) -> None:
     file_tasks = [(cat, file_name) for cat in selected_cats for file_name in categories[cat]]
     required_counts = {cat: len(categories[cat]) for cat in selected_cats}
     downloaded_counts = {cat: 0 for cat in selected_cats}
@@ -100,13 +106,14 @@ def run_pipeline(selected_cats: list[str], download_workers: int, extract_worker
 
     print(
         f"Starting pipeline: {len(file_tasks)} files, "
-        f"download_workers={download_workers}, extract_workers={extract_workers}"
+        f"download_workers={download_workers}, extract_workers={extract_workers}, "
+        f"output_dir={output_dir}"
     )
 
     with ThreadPoolExecutor(max_workers=extract_workers) as extract_executor:
         with ThreadPoolExecutor(max_workers=download_workers) as download_executor:
             future_to_task = {
-                download_executor.submit(download_file, file_name): (cat, file_name)
+                download_executor.submit(download_file, file_name, output_dir): (cat, file_name)
                 for cat, file_name in file_tasks
             }
 
@@ -136,6 +143,7 @@ def run_pipeline(selected_cats: list[str], download_workers: int, extract_worker
                         merge_extract_cleanup,
                         cat,
                         categories[cat],
+                        output_dir,
                     )
 
         for cat, extract_future in extract_futures.items():
@@ -173,6 +181,12 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="并行解压/清理线程数（默认: 1，避免磁盘争用）。",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path.cwd(),
+        help="下载与解压输出目录（默认: 当前工作目录）。",
+    )
     return parser.parse_args()
 
 
@@ -183,6 +197,9 @@ def main() -> None:
     if args.extract_workers < 1:
         raise ValueError("--extract-workers 必须 >= 1")
 
+    output_dir = args.output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     if args.cat == 'all':
         selected = sorted(categories.keys())
     else:
@@ -191,7 +208,7 @@ def main() -> None:
             raise ValueError(f"Unknown category: {args.cat}. Available: {available}")
         selected = [args.cat]
 
-    run_pipeline(selected, args.workers, args.extract_workers)
+    run_pipeline(selected, args.workers, args.extract_workers, output_dir)
 
 
 if __name__ == "__main__":
