@@ -1,6 +1,7 @@
 import argparse
+import shutil
 import subprocess
-import threading
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -60,20 +61,45 @@ def run_cmd(cmd: list[str], cwd: Path) -> None:
     subprocess.run(cmd, check=True, cwd=str(cwd))
 
 
-def download_file(file_name: str, output_dir: Path) -> str:
-    url = f"{BASE_URL}/{file_name}?download=true"
-    print(f"[Download] {file_name}")
-    run_cmd([
-        "wget",
-        "--continue",
-        "--tries=20",
-        "--retry-connrefused",
-        "--waitretry=2",
-        "-O",
-        file_name,
-        url,
-    ], cwd=output_dir)
-    return file_name
+def require_aria2c() -> None:
+    if shutil.which("aria2c") is None:
+        raise RuntimeError("aria2c not found. Please install aria2c first.")
+
+
+def build_aria2_input(file_names: list[str], output_dir: Path) -> Path:
+    with tempfile.NamedTemporaryFile("w", delete=False, suffix=".aria2", dir=str(output_dir)) as f:
+        for file_name in file_names:
+            f.write(f"{BASE_URL}/{file_name}?download=true\n")
+            f.write(f" out={file_name}\n")
+        return Path(f.name)
+
+
+def download_with_aria2(file_names: list[str], workers: int, output_dir: Path) -> None:
+    require_aria2c()
+    input_file = build_aria2_input(file_names, output_dir)
+    print(f"[Download] queued {len(file_names)} files with aria2c")
+
+    cmd = [
+        "aria2c",
+        "--enable-color=false",
+        "--continue=true",
+        "--max-tries=20",
+        "--retry-wait=2",
+        "--max-concurrent-downloads",
+        str(workers),
+        "--split=8",
+        "--min-split-size=10M",
+        "--summary-interval=1",
+        "--input-file",
+        str(input_file),
+        "--dir",
+        str(output_dir),
+    ]
+
+    try:
+        run_cmd(cmd, cwd=output_dir)
+    finally:
+        input_file.unlink(missing_ok=True)
 
 
 def merge_extract_cleanup(cat: str, parts: list[str], output_dir: Path) -> None:
@@ -90,80 +116,41 @@ def merge_extract_cleanup(cat: str, parts: list[str], output_dir: Path) -> None:
     print(f"[Done] {cat}")
 
 
+def extract_categories(selected_cats: list[str], extract_workers: int, output_dir: Path) -> None:
+    failed_cats = set()
+    with ThreadPoolExecutor(max_workers=extract_workers) as extract_executor:
+        futures = {
+            extract_executor.submit(merge_extract_cleanup, cat, categories[cat], output_dir): cat
+            for cat in selected_cats
+        }
+        for future in as_completed(futures):
+            cat = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                failed_cats.add(cat)
+                print(f"[Failed Extract] {cat}: {exc}")
+
+    if failed_cats:
+        failed_desc = ", ".join(sorted(failed_cats))
+        raise RuntimeError(f"Extraction failed for categories: {failed_desc}")
+
+
 def run_pipeline(
     selected_cats: list[str],
     download_workers: int,
     extract_workers: int,
     output_dir: Path,
 ) -> None:
-    file_tasks = [(cat, file_name) for cat in selected_cats for file_name in categories[cat]]
-    required_counts = {cat: len(categories[cat]) for cat in selected_cats}
-    downloaded_counts = {cat: 0 for cat in selected_cats}
-
-    extract_futures = {}
-    failed_cats = set()
-    lock = threading.Lock()
-
+    file_names = [file_name for cat in selected_cats for file_name in categories[cat]]
     print(
-        f"Starting pipeline: {len(file_tasks)} files, "
+        f"Starting pipeline: {len(file_names)} files, "
         f"download_workers={download_workers}, extract_workers={extract_workers}, "
         f"output_dir={output_dir}"
     )
 
-    with ThreadPoolExecutor(max_workers=extract_workers) as extract_executor:
-        with ThreadPoolExecutor(max_workers=download_workers) as download_executor:
-            future_to_task = {
-                download_executor.submit(download_file, file_name, output_dir): (cat, file_name)
-                for cat, file_name in file_tasks
-            }
-
-            for future in as_completed(future_to_task):
-                cat, file_name = future_to_task[future]
-                try:
-                    future.result()
-                except Exception as exc:
-                    with lock:
-                        failed_cats.add(cat)
-                    print(f"[Failed Download] {cat}/{file_name}: {exc}")
-                    continue
-
-                submit_extract = False
-                with lock:
-                    downloaded_counts[cat] += 1
-                    if (
-                        cat not in failed_cats
-                        and downloaded_counts[cat] == required_counts[cat]
-                        and cat not in extract_futures
-                    ):
-                        submit_extract = True
-
-                if submit_extract:
-                    print(f"[Ready] {cat} files complete, queue extract")
-                    extract_futures[cat] = extract_executor.submit(
-                        merge_extract_cleanup,
-                        cat,
-                        categories[cat],
-                        output_dir,
-                    )
-
-        for cat, extract_future in extract_futures.items():
-            try:
-                extract_future.result()
-            except Exception as exc:
-                failed_cats.add(cat)
-                print(f"[Failed Extract] {cat}: {exc}")
-
-    missing_extract = [
-        cat
-        for cat in selected_cats
-        if cat not in failed_cats and downloaded_counts[cat] == required_counts[cat] and cat not in extract_futures
-    ]
-    if missing_extract:
-        failed_cats.update(missing_extract)
-
-    if failed_cats:
-        failed_desc = ", ".join(sorted(failed_cats))
-        raise RuntimeError(f"Pipeline failed for categories: {failed_desc}")
+    download_with_aria2(file_names, download_workers, output_dir)
+    extract_categories(selected_cats, extract_workers, output_dir)
 
 
 def parse_args() -> argparse.Namespace:
@@ -173,7 +160,7 @@ def parse_args() -> argparse.Namespace:
         "--workers",
         type=int,
         default=8,
-        help="并行下载线程数（全局文件队列，默认: 8）。",
+        help="aria2c 并行下载数（默认: 8）。",
     )
     parser.add_argument(
         "--extract-workers",

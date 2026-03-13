@@ -27,7 +27,7 @@ To download all categories, execute `python download.py --cat all`.
 
 To download specific one category, execute `python download.py --cat <category_name>`.
 
-To accelerate downloads, the script now parallelizes across a global file queue. You can tune download/extract concurrency and output path, e.g. `python download.py --cat all --workers 16 --extract-workers 1 --output-dir /data/WildRGB-D`.
+To accelerate downloads, the script now uses `aria2c` for concurrent downloads and progress display. You can tune download/extract concurrency and output path, e.g. `python download.py --cat all --workers 16 --extract-workers 1 --output-dir /data/WildRGB-D` (please install `aria2c` first).
 
 You could check all category names in the download scripts.
 
