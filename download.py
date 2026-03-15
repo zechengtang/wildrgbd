@@ -140,6 +140,7 @@ def run_pipeline(
     selected_cats: list[str],
     download_workers: int,
     extract_workers: int,
+    download_only: bool,
     output_dir: Path,
 ) -> None:
     file_names = [file_name for cat in selected_cats for file_name in categories[cat]]
@@ -150,6 +151,10 @@ def run_pipeline(
     )
 
     download_with_aria2(file_names, download_workers, output_dir)
+    if download_only:
+        print("[Skip] --download-only enabled; skip extraction and cleanup.")
+        return
+
     extract_categories(selected_cats, extract_workers, output_dir)
 
 
@@ -159,14 +164,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--workers",
         type=int,
-        default=8,
-        help="aria2c 并行下载数（默认: 8）。",
+        default=32,
+        help="aria2c 并行下载数（默认: 32）。",
     )
     parser.add_argument(
         "--extract-workers",
         type=int,
-        default=1,
-        help="并行解压/清理线程数（默认: 1，避免磁盘争用）。",
+        default=4,
+        help="并行解压/清理线程数（默认: 4）。",
+    )
+    parser.add_argument(
+        "--download-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="是否仅下载不解压（默认: 开启）。使用 --no-download-only 可启用解压与清理。",
     )
     parser.add_argument(
         "--output-dir",
@@ -195,7 +206,7 @@ def main() -> None:
             raise ValueError(f"Unknown category: {args.cat}. Available: {available}")
         selected = [args.cat]
 
-    run_pipeline(selected, args.workers, args.extract_workers, output_dir)
+    run_pipeline(selected, args.workers, args.extract_workers, args.download_only, output_dir)
 
 
 if __name__ == "__main__":
